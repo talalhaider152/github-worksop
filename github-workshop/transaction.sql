@@ -1,1 +1,5 @@
-Select * FROM transactions WHERE amount > 1000;
+SELECT
+    id,
+    name
+FROM transactions
+WHERE amount > 1000;

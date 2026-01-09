@@ -2,7 +2,7 @@
 
 # Check Python files for syntax errors
 
-for file in $(git diff --cached --name-only | grep -E '\.py$'):do
+for file in $(git diff --cached --name-only | grep -E '\.py$'); do
     if ! python -m py_compile "$file"; then
         echo "Syntax error in $file"
         exit 1

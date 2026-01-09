@@ -1,9 +1,9 @@
 def func():
 
-    a = 4
+    x = 4
     v = 3
 
-    return v + a
+    return v + x
 
 
 func()

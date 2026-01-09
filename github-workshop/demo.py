@@ -1,12 +1,9 @@
 def func():
-    a=4
-    v=3
 
-    return uo
+    a = 4
+    v = 3
 
-
-fun()
+    return v + a
 
 
-
-my_test()
+func()

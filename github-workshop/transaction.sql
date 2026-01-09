@@ -1,0 +1,1 @@
+Select * FROM transactions WHERE amount > 1000;

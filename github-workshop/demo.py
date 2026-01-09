@@ -2,7 +2,7 @@ def func():
     a=4
     v=3
 
-    return t
+    return uo
 
 
 fun()

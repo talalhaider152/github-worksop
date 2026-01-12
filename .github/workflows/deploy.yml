@@ -21,10 +21,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-
-      - name: Build
-        run: npm run build
-
       - name: Deploy (Staging)
         run: echo "Deploy command here"
 

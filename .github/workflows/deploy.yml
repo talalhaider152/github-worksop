@@ -57,14 +57,8 @@ jobs:
   # When PR dev->main is created manually, create ticket
   # ---------------------------------------------------
   create-approval-issue:
-    if: >
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.ref == 'dev' &&
-      github.event.pull_request.base.ref == 'main'
-    runs-on: ubuntu-latest
-
-    steps:
       - name: Create / Reuse Approval Issue Ticket
+        id: issue
         uses: actions/github-script@v7
         env:
           APPROVER_GITHUB_USERNAME: ${{ secrets.APPROVER_GITHUB_USERNAME }}
@@ -82,7 +76,9 @@ jobs:
               return;
             }
 
-            // Find existing ticket for this PR (if any)
+            core.info(`Approver from secret: ${approver}`);
+
+            // Check if approval issue already exists for this PR
             const { data: issues } = await github.rest.issues.listForRepo({
               owner,
               repo,
@@ -94,6 +90,7 @@ jobs:
             const existing = issues.find(i => i.title.includes(`#${prNumber}`));
             if (existing) {
               core.info(`✅ Approval issue already exists: #${existing.number}`);
+              core.setOutput("issue_number", String(existing.number));
               return;
             }
 
@@ -106,16 +103,40 @@ jobs:
               "`approved` OR `approve`\n\n" +
               "Once approved, this PR will merge automatically.\n";
 
-            const { data: created } = await github.rest.issues.create({
-              owner,
-              repo,
-              title: `Approval Required: Merge PR #${prNumber}`,
-              body: issueBody,
-              assignees: [approver],
-              labels: ["approval-required"]
-            });
+            let created;
 
-            core.info(`✅ Approval ticket created: #${created.number}`);
+            // ✅ Try assigning first
+            try {
+              const resp = await github.rest.issues.create({
+                owner,
+                repo,
+                title: `Approval Required: Merge PR #${prNumber}`,
+                body: issueBody,
+                assignees: [approver],
+                labels: ["approval-required"]
+              });
+
+              created = resp.data;
+              core.info(`✅ Issue created and assigned to @${approver}`);
+
+            } catch (e) {
+              // ✅ Fallback: Create without assignee
+              core.warning(`⚠️ Cannot assign @${approver}. Creating issue without assignee.`);
+              core.warning(String(e?.message || e));
+
+              const resp = await github.rest.issues.create({
+                owner,
+                repo,
+                title: `Approval Required: Merge PR #${prNumber}`,
+                body: issueBody,
+                labels: ["approval-required"]
+              });
+
+              created = resp.data;
+              core.info("✅ Issue created without assignee, approver is @mentioned.");
+            }
+
+            core.setOutput("issue_number", String(created.number));
 
   # ----------------------------------------------------
   # When approver comments on ticket with approved/approve

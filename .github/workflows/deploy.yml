@@ -6,16 +6,16 @@ on:
     branches:
       - dev
 
-  # 2) When PR is opened/updated to main (manual PR creation)
+  # 2) When PR is opened to main (manual PR creation)
   pull_request:
-    types: [opened, reopened, synchronize]
+    types: [opened]
     branches:
       - main
 
   # 3) When someone comments on an issue OR PR (approval trigger)
   issue_comment:
     types: [created]
-
+#
 permissions:
   contents: write
   pull-requests: write

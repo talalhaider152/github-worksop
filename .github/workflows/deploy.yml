@@ -48,49 +48,51 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            // ✅ Confirm dev branch exists
+            // Confirm dev branch exists
             try {
               await github.rest.repos.getBranch({ owner, repo, branch: "dev" });
-              core.info("✅ dev branch exists");
+              core.info("dev branch exists");
             } catch (e) {
-              core.setFailed("❌ dev branch does not exist. Create it first.");
+              core.setFailed("dev branch does not exist. Create it first.");
               return;
             }
 
-            // ✅ Check if PR already exists dev -> main
+            // Check if PR already exists dev -> main
             const { data: prs } = await github.rest.pulls.list({
               owner,
               repo,
               head: `${owner}:dev`,
               base: "main",
-              state: "open"
+              state: "open",
+              per_page: 10
             });
 
             let pr;
+
             if (prs.length > 0) {
               pr = prs[0];
-              core.info(`✅ PR already exists: #${pr.number}`);
+              core.info(`PR already exists: #${pr.number}`);
             } else {
-              // ✅ Create PR
+              const bodyText =
+                "✅ CI passed\n" +
+                "✅ Deploy passed\n\n" +
+                "Approval required via ticket comment:\n" +
+                "Type **approve** / **approved** in the issue ticket to merge automatically.\n";
+
               const { data: newPr } = await github.rest.pulls.create({
                 owner,
                 repo,
                 head: "dev",
                 base: "main",
                 title: "Auto PR: dev → main",
-                body: `
-            ✅ CI passed  
-            ✅ Deploy passed  
+                body: bodyText
+              });
 
-            Approval required via ticket comment:
-            Type **approve** / **approved** in the issue ticket to merge automatically.
-                            `
-                          });
-                          pr = newPr;
-                          core.info(`✅ PR created: #${pr.number}`);
-                        }
+              pr = newPr;
+              core.info(`PR created: #${pr.number}`);
+            }
 
-            core.setOutput("pr_number", pr.number);
+            core.setOutput("pr_number", String(pr.number));
 
       - name: Create Approval Issue Ticket
         id: issue
@@ -101,15 +103,22 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const prNumber = Number("${{ steps.pr.outputs.pr_number }}");
+
+            const prNumberRaw = "${{ steps.pr.outputs.pr_number }}";
+            const prNumber = Number(prNumberRaw);
             const approver = process.env.APPROVER_GITHUB_USERNAME;
 
-            if (!approver) {
-              core.setFailed("❌ Missing APPROVER_GITHUB_USERNAME secret.");
+            if (!prNumber) {
+              core.setFailed("Missing PR number from previous step.");
               return;
             }
 
-            // ✅ Check if approval issue already exists for this PR
+            if (!approver) {
+              core.setFailed("Missing APPROVER_GITHUB_USERNAME secret.");
+              return;
+            }
+
+            // Check if approval issue already exists for this PR
             const { data: issues } = await github.rest.issues.listForRepo({
               owner,
               repo,
@@ -121,102 +130,98 @@ jobs:
             const existing = issues.find(i => i.title.includes(`#${prNumber}`));
 
             if (existing) {
-              core.info(`✅ Approval issue already exists: #${existing.number}`);
-              core.setOutput("issue_number", existing.number);
+              core.info(`Approval issue already exists: #${existing.number}`);
+              core.setOutput("issue_number", String(existing.number));
               return;
             }
 
             const prUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
+            const issueBody =
+              "🚀 **Approval Ticket Created**\n\n" +
+              `🔗 PR Link: ${prUrl}\n\n` +
+              "✅ CI passed\n" +
+              "✅ Deploy passed\n\n" +
+              `👤 Approver: @${approver}\n\n` +
+              "**How to Approve**\n" +
+              "Comment on this issue with:\n\n" +
+              "`approved` OR `approve`\n\n" +
+              "Once approved, PR will merge automatically.\n";
 
-            const { data: issue } = await github.rest.issues.create({
+            const { data: created } = await github.rest.issues.create({
               owner,
               repo,
               title: `Approval Required: Merge PR #${prNumber}`,
-              body: `
-            🚀 **Approval Ticket Created**
+              body: issueBody,
+              assignees: [approver],
+              labels: ["approval-required"]
+            });
 
-            🔗 PR Link: ${prUrl}
+            core.setOutput("issue_number", String(created.number));
 
-            👤 Approver: @${approver}
+  wait-for-approval-and-merge:
+    runs-on: ubuntu-latest
+    needs: create-pr-and-ticket
 
-            ✅ CI passed  
-            ✅ Deploy passed  
+    steps:
+      - name: Wait for Approval Comment and Merge
+        uses: actions/github-script@v7
+        env:
+          APPROVER_GITHUB_USERNAME: ${{ secrets.APPROVER_GITHUB_USERNAME }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
 
-            **How to Approve**
-            Comment on this issue with:
+            const prNumber = Number("${{ needs.create-pr-and-ticket.outputs.pr_number }}");
+            const issueNumber = Number("${{ needs.create-pr-and-ticket.outputs.issue_number }}");
+            const approver = (process.env.APPROVER_GITHUB_USERNAME || "").toLowerCase();
 
-            \`approved\` OR \`approve\`
+            if (!prNumber || !issueNumber) {
+              core.setFailed("Missing PR number or Issue number.");
+              return;
+            }
 
-            Once approved, PR will merge automatically.
-                        `,
-                        assignees: [approver],
-                        labels: ["approval-required"]
-                          });
+            if (!approver) {
+              core.setFailed("Missing APPROVER_GITHUB_USERNAME secret.");
+              return;
+            }
 
-                        core.setOutput("issue_number", issue.number);
+            core.info(`Waiting for approval on issue #${issueNumber} for PR #${prNumber}. Approver: @${approver}`);
 
-        wait-for-approval-and-merge:
-          runs-on: ubuntu-latest
-          needs: create-pr-and-ticket
+            const maxAttempts = 60; // 30 minutes
+            const delayMs = 30000;
 
-          steps:
-            - name: Wait for Approval Comment and Merge
-              uses: actions/github-script@v7
-              env:
-                APPROVER_GITHUB_USERNAME: ${{ secrets.APPROVER_GITHUB_USERNAME }}
-              with:
-                script: |
-                  const owner = context.repo.owner;
-                  const repo = context.repo.repo;
-                  const prNumber = Number("${{ needs.create-pr-and-ticket.outputs.pr_number }}");
-                  const issueNumber = Number("${{ needs.create-pr-and-ticket.outputs.issue_number }}");
-                  const approver = (process.env.APPROVER_GITHUB_USERNAME || "").toLowerCase();
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              core.info(`Attempt ${attempt}/${maxAttempts}`);
 
-                  if (!prNumber || !issueNumber) {
-                    core.setFailed("❌ Missing PR number or Issue number.");
-                    return;
-                  }
+              const { data: comments } = await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                per_page: 100
+              });
 
-                  core.info(`Waiting for approval on issue #${issueNumber} for PR #${prNumber}`);
+              const approved = comments.some(c => {
+                const body = (c.body || "").trim().toLowerCase();
+                const author = (c.user?.login || "").trim().toLowerCase();
+                return (author === approver) && (body === "approved" || body === "approve");
+              });
 
-                  const maxAttempts = 60; // 30 min
-                  const delayMs = 30000;
+              if (approved) {
+                core.info("Approval detected. Merging PR...");
 
-                  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    core.info(`Attempt ${attempt}/${maxAttempts}`);
+                await github.rest.pulls.merge({
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  merge_method: "squash"
+                });
 
-                    const { data: comments } = await github.rest.issues.listComments({
-                      owner,
-                      repo,
-                      issue_number: issueNumber,
-                      per_page: 50
-                    });
+                core.info("PR merged successfully!");
+                return;
+              }
 
-                    const approved = comments.some(c => {
-                      const body = (c.body || "").trim().toLowerCase();
-                      const author = (c.user?.login || "").trim().toLowerCase();
+              await new Promise(r => setTimeout(r, delayMs));
+            }
 
-                      return (
-                        (body === "approved" || body === "approve") &&
-                        author === approver
-                      );
-                    });
-
-                    if (approved) {
-                      core.info("✅ Approval detected. Merging PR...");
-
-                      await github.rest.pulls.merge({
-                        owner,
-                        repo,
-                        pull_number: prNumber,
-                        merge_method: "squash"
-                      });
-
-                      core.info("🎉 PR merged successfully!");
-                      return;
-                    }
-
-                    await new Promise(r => setTimeout(r, delayMs));
-                  }
-
-                  core.setFailed("❌ Approval not received in time.");
+            core.setFailed("Approval not received in time.");

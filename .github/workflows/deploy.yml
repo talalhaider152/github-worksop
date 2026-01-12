@@ -21,6 +21,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+
       - name: Deploy (Staging)
         run: echo "Deploy command here"
 
@@ -33,6 +34,9 @@ jobs:
       issue_number: ${{ steps.create_issue.outputs.issue_number }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
       - name: Create PR (dev -> main)
         id: pr
         uses: peter-evans/create-pull-request@v6

@@ -148,7 +148,7 @@ jobs:
   # When approver comments on ticket with approved/approve
   # merge the PR
   # ----------------------------------------------------
-  merge-on-approval-comment:
+    merge-on-approval-comment:
     if: github.event_name == 'issue_comment'
     runs-on: ubuntu-latest
 
@@ -168,19 +168,6 @@ jobs:
               return;
             }
 
-            // Only continue if this is an Issue (not PR comment)
-            if (!context.payload.issue || context.payload.issue.pull_request) {
-              core.info("Skipping: This is not an approval issue ticket comment.");
-              return;
-            }
-
-            // Only proceed if issue has label approval-required
-            const labels = (context.payload.issue.labels || []).map(l => l.name);
-            if (!labels.includes("approval-required")) {
-              core.info("Skipping: Issue does not have approval-required label.");
-              return;
-            }
-
             const commentBody = (context.payload.comment.body || "").trim().toLowerCase();
             const commentAuthor = (context.payload.comment.user.login || "").trim().toLowerCase();
 
@@ -196,25 +183,43 @@ jobs:
               return;
             }
 
-            const issueTitle = context.payload.issue.title || "";
-            const match = issueTitle.match(/#(\d+)/);
+            // If it's a PR comment, context.payload.issue.pull_request exists
+            const isPrComment = !!context.payload.issue?.pull_request;
 
-            if (!match) {
-              core.setFailed("❌ Could not extract PR number from issue title.");
-              return;
+            let prNumber = null;
+
+            if (isPrComment) {
+              // ✅ Approval comment is on PR
+              prNumber = Number(context.payload.issue.number);
+              core.info(`Approval comment detected on PR #${prNumber}`);
+            } else {
+              // ✅ Approval comment is on Issue ticket
+              const labels = (context.payload.issue.labels || []).map(l => l.name);
+              if (!labels.includes("approval-required")) {
+                core.info("Skipping: Issue does not have approval-required label.");
+                return;
+              }
+
+              const issueTitle = context.payload.issue.title || "";
+              const match = issueTitle.match(/#(\d+)/);
+
+              if (!match) {
+                core.setFailed("❌ Could not extract PR number from issue title.");
+                return;
+              }
+
+              prNumber = Number(match[1]);
+              core.info(`Approval comment detected on ticket, PR #${prNumber}`);
             }
 
-            const prNumber = Number(match[1]);
-            core.info(`✅ Approval detected. Will merge PR #${prNumber}`);
-
-            // Ensure PR exists
+            // ✅ Fetch PR
             const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
               pull_number: prNumber
             });
 
-            // Only allow dev -> main merge
+            // ✅ Only allow dev -> main merge
             if (pr.base.ref !== "main" || pr.head.ref !== "dev") {
               core.info(`Skipping: PR is ${pr.head.ref} -> ${pr.base.ref}, only dev -> main allowed.`);
               return;
@@ -225,7 +230,7 @@ jobs:
               return;
             }
 
-            // Merge PR
+            // ✅ Merge PR
             await github.rest.pulls.merge({
               owner,
               repo,
@@ -235,12 +240,13 @@ jobs:
 
             core.info("🎉 PR merged successfully!");
 
-            // Close ticket
-            await github.rest.issues.update({
-              owner,
-              repo,
-              issue_number: context.payload.issue.number,
-              state: "closed"
-            });
-
-            core.info("✅ Approval ticket closed.");
+            // ✅ If comment was on ticket, close ticket
+            if (!isPrComment) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: context.payload.issue.number,
+                state: "closed"
+              });
+              core.info("✅ Approval ticket closed.");
+            }

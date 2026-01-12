@@ -1,0 +1,252 @@
+name: CI on dev + PR Approval Ticket + Auto Merge (Event Driven)
+
+on:
+  # 1) CI on push to dev
+  push:
+    branches:
+      - dev
+
+  # 2) When PR is opened/updated to main (manual PR creation)
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+
+  # 3) When someone comments on an issue OR PR (approval trigger)
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ---------------------------
+  # CI Job (runs only on dev push)
+  # ---------------------------
+  ci-dev:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Optional tests (enable if needed)
+      - name: Run tests
+        run: |
+          echo "Running tests..."
+          # pytest -v
+
+      - name: Deploy (Staging)
+        run: echo "Deploy command here"
+
+  # ---------------------------------------------------
+  # When PR dev->main is created manually, create ticket
+  # ---------------------------------------------------
+  create-approval-issue:
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.ref == 'dev' &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create / Reuse Approval Issue Ticket
+        id: issue
+        uses: actions/github-script@v7
+        env:
+          APPROVER_GITHUB_USERNAME: ${{ secrets.APPROVER_GITHUB_USERNAME }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const prNumber = Number(context.payload.pull_request.number);
+            const prUrl = context.payload.pull_request.html_url;
+            const approver = process.env.APPROVER_GITHUB_USERNAME;
+
+            if (!approver) {
+              core.setFailed("❌ Missing APPROVER_GITHUB_USERNAME secret.");
+              return;
+            }
+
+            core.info(`Approver from secret: ${approver}`);
+
+            // Check if approval issue already exists for this PR
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: "open",
+              labels: "approval-required",
+              per_page: 100
+            });
+
+            const existing = issues.find(i => i.title.includes(`#${prNumber}`));
+            if (existing) {
+              core.info(`✅ Approval issue already exists: #${existing.number}`);
+              return;
+            }
+
+            const issueBody =
+              "🚀 **Approval Ticket Created**\n\n" +
+              `🔗 PR Link: ${prUrl}\n\n` +
+              `👤 Approver: @${approver}\n\n` +
+              "**How to Approve**\n" +
+              "Comment on this issue with:\n\n" +
+              "`approved` OR `approve`\n\n" +
+              "Once approved, this PR will merge automatically.\n";
+
+            let created;
+
+            // ✅ Try assigning first
+            try {
+              const resp = await github.rest.issues.create({
+                owner,
+                repo,
+                title: `Approval Required: Merge PR #${prNumber}`,
+                body: issueBody,
+                assignees: [approver],
+                labels: ["approval-required"]
+              });
+
+              created = resp.data;
+              core.info(`✅ Issue created and assigned to @${approver}`);
+
+            } catch (e) {
+              // ✅ Fallback: Create without assignee
+              core.warning(`⚠️ Cannot assign @${approver}. Creating issue without assignee.`);
+              core.warning(String(e?.message || e));
+
+              const resp = await github.rest.issues.create({
+                owner,
+                repo,
+                title: `Approval Required: Merge PR #${prNumber}`,
+                body: issueBody,
+                labels: ["approval-required"]
+              });
+
+              created = resp.data;
+              core.info("✅ Issue created without assignee, approver is @mentioned.");
+            }
+
+            core.info(`Ticket created: #${created.number}`);
+
+  # ----------------------------------------------------
+  # When approver comments approved/approve -> merge PR
+  # This triggers for BOTH issue comment and PR comment
+  # ----------------------------------------------------
+  merge-on-approval-comment:
+    if: github.event_name == 'issue_comment'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Merge PR when approved comment is added
+        uses: actions/github-script@v7
+        env:
+          APPROVER_GITHUB_USERNAME: ${{ secrets.APPROVER_GITHUB_USERNAME }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const approver = (process.env.APPROVER_GITHUB_USERNAME || "").toLowerCase();
+            if (!approver) {
+              core.setFailed("❌ Missing APPROVER_GITHUB_USERNAME secret.");
+              return;
+            }
+
+            const commentBody = (context.payload.comment.body || "").trim().toLowerCase();
+            const commentAuthor = (context.payload.comment.user.login || "").trim().toLowerCase();
+
+            // ✅ Only approver can approve
+            if (commentAuthor !== approver) {
+              core.info(`Skipping: Comment author @${commentAuthor} is not approver @${approver}.`);
+              return;
+            }
+
+            // ✅ Only accept approve keywords
+            if (!(commentBody === "approved" || commentBody === "approve")) {
+              core.info("Skipping: Comment is not an approval keyword.");
+              return;
+            }
+
+            // If it's a PR comment, payload.issue.pull_request exists
+            const isPrComment = !!context.payload.issue?.pull_request;
+
+            let prNumber = null;
+
+            if (isPrComment) {
+              // ✅ Approval comment is on PR
+              prNumber = Number(context.payload.issue.number);
+              core.info(`Approval comment detected on PR #${prNumber}`);
+            } else {
+              // ✅ Approval comment is on Issue ticket
+              const labels = (context.payload.issue.labels || []).map(l => l.name);
+              if (!labels.includes("approval-required")) {
+                core.info("Skipping: Issue does not have approval-required label.");
+                return;
+              }
+
+              const issueTitle = context.payload.issue.title || "";
+              const match = issueTitle.match(/#(\d+)/);
+
+              if (!match) {
+                core.setFailed("❌ Could not extract PR number from issue title.");
+                return;
+              }
+
+              prNumber = Number(match[1]);
+              core.info(`Approval comment detected on ticket, PR #${prNumber}`);
+            }
+
+            // ✅ Fetch PR
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber
+            });
+
+            // ✅ Only allow dev -> main merge
+            if (pr.base.ref !== "main" || pr.head.ref !== "dev") {
+              core.info(`Skipping: PR is ${pr.head.ref} -> ${pr.base.ref}, only dev -> main allowed.`);
+              return;
+            }
+
+            if (pr.state !== "open") {
+              core.info("Skipping: PR is not open.");
+              return;
+            }
+
+            // ✅ Merge PR
+            await github.rest.pulls.merge({
+              owner,
+              repo,
+              pull_number: prNumber,
+              merge_method: "squash"
+            });
+
+            core.info("🎉 PR merged successfully!");
+
+            // ✅ If comment was on ticket, close ticket
+            if (!isPrComment) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: context.payload.issue.number,
+                state: "closed"
+              });
+              core.info("✅ Approval ticket closed.");
+            }
